@@ -1,0 +1,159 @@
+import SwiftUI
+import Network
+
+struct ContentView: View {
+    @State private var boardIP: String = ""
+    @State private var port: String = "80"   // default 80, can change
+    @State private var status: String = "Idle"
+    @State private var isConnecting: Bool = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                // STEP 1 – Wi-Fi instructions
+                Section(
+                    header: Text("Step 1: Connect to Board Wi-Fi"),
+                    footer: Text("On your iPhone, go to Settings → Wi-Fi and join \"Secure-LS1088A\". Then return to this app.")
+                ) {
+                    Text("This app assumes you're already on the board's access-point network.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+
+                // STEP 2 – Board IP/Port
+                Section(header: Text("Step 2: Board Connection")) {
+                    TextField("Board IP (e.g., 192.168.4.1)", text: $boardIP)
+                        .keyboardType(.numbersAndPunctuation)
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
+
+                    TextField("Port (e.g., 22 for SSH, 80 for HTTP)", text: $port)
+                        .keyboardType(.numberPad)
+                }
+
+                // ACTIONS
+                Section(header: Text("Actions")) {
+                    Button {
+                        testTcpConnection()
+                    } label: {
+                        if isConnecting {
+                            ProgressView()
+                        } else {
+                            Text("Check TCP Port")
+                        }
+                    }
+                    .disabled(boardIP.isEmpty || port.isEmpty || isConnecting)
+
+                    Button("HTTP Test") {
+                        httpTest()
+                    }
+                    .disabled(boardIP.isEmpty || port.isEmpty)
+
+                    Text("Status: \(status)")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .navigationTitle("NXP Board Connector")
+        }
+    }
+
+    // MARK: - TCP Port Test
+
+    private func testTcpConnection() {
+        let trimmedIP = boardIP.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedIP.isEmpty else {
+            status = "Please enter the Board IP (e.g., 192.168.4.1)."
+            return
+        }
+
+        guard let portNum = UInt16(port), (1...65535).contains(portNum) else {
+            status = "Invalid port. Use 1–65535 (e.g., 80 or 22)."
+            return
+        }
+
+        isConnecting = true
+        status = "Connecting to \(trimmedIP):\(portNum)..."
+
+        let params = NWParameters.tcp
+        guard let nwPort = NWEndpoint.Port(rawValue: portNum) else {
+            status = "Invalid port."
+            isConnecting = false
+            return
+        }
+
+        let connection = NWConnection(
+            host: NWEndpoint.Host(trimmedIP),
+            port: nwPort,
+            using: params
+        )
+
+        connection.stateUpdateHandler = { newState in
+            DispatchQueue.main.async {
+                switch newState {
+                case .ready:
+                    self.status = "✅ TCP connected to \(trimmedIP):\(portNum)"
+                    self.isConnecting = false
+                    connection.cancel()
+
+                case .failed(let error):
+                    self.status = "❌ TCP failed: \(error.localizedDescription)"
+                    self.isConnecting = false
+                    connection.cancel()
+
+                case .waiting(let error):
+                    self.status = "⏳ TCP waiting: \(error.localizedDescription)"
+
+                default:
+                    break
+                }
+            }
+        }
+
+        connection.start(queue: .global(qos: .background))
+    }
+
+    // MARK: - HTTP Test
+
+    private func httpTest() {
+        let trimmedIP = boardIP.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let portNum = UInt16(port),
+              let url = URL(string: "http://\(trimmedIP):\(portNum)/") else {
+            status = "Invalid IP or port for HTTP."
+            return
+        }
+
+        status = "Sending HTTP GET to \(url.absoluteString)..."
+
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    self.status = "❌ HTTP error: \(error.localizedDescription)"
+                    return
+                }
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self.status = "❌ No HTTP response"
+                    return
+                }
+
+                if let data = data,
+                   let body = String(data: data, encoding: .utf8),
+                   !body.isEmpty {
+
+                    let snippet = body.prefix(300)  // don’t spam the UI
+                    self.status =
+                    """
+                    ✅ HTTP \(httpResponse.statusCode)
+                    Response:
+                    \(snippet)
+                    """
+                } else {
+                    self.status = "✅ HTTP \(httpResponse.statusCode) (empty body)"
+                }
+            }
+        }.resume()
+    }
+}
